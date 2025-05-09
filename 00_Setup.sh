@@ -1,0 +1,14 @@
+mkdir results
+mkdir scripts
+cd scripts
+mkdir output
+cd ../
+mkdir data
+cd data
+mkdir raw
+mkdir processed
+cd processed
+mkdir quality_cont
+mkdir rds
+mkdir txt
+cd ../../

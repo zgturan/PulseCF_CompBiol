@@ -1,0 +1,495 @@
+---
+title: "PulseCF_CompBiol"
+author: "CandidateXYZ"
+date: "2025-05-06"
+output:
+  bookdown::html_document2:
+    number_sections: true
+    toc: true
+  bookdown::pdf_document2:
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo= TRUE, fig.align= "center", fig.margin= c(1, 1, 1, 1))
+```
+
+## Introduction
+
+**Aim:** The aim of this study is to evaluate the impact of a novel therapeutic intervention for osteoarthritis by using synovial‐fluid proteomics to monitor how the treatment alters joint protein profiles over time, relative to an healthy control.
+
+**Study design:** A repeated‐measures, within‐subject design in six mice, with osteoarthritis induced and treated in one joint and the matched healthy joint serving as the control, sampled for synovial‐fluid proteomics at days 0, 7, 14, and 49.
+
+## Setup
+Load packages, set seed, define theme/colors.
+
+```{r install_lib}
+set.seed(123)          # set seed for reproducibility of random processes 
+                       # (e.g., permutations, random sampling, or jitter in plots)
+
+suppressPackageStartupMessages(library(here))
+source(here("scripts","00_Sources.R")) # upload required libraries and packages
+
+# install any if you don not have them
+# install.packages(c("dplyr","tidyr","ggplot2","patchwork","RColorBrewer", 
+#                    "lme4","lmerTest","emmeans","openxlsx","biomaRt"))
+```
+
+## Sample Metadata
+```{r sample_inf, fig.width=4, fig.height=4, echo=FALSE}
+samp_info=      read.csv(here("data", "processed", "txt", "Metadata_TaskDataScienceJob.csv")) # read sample information file
+str(samp_info)  # check data types of each column in the sample file
+dim(samp_info)  # check the dimensions of the data
+head(samp_info) # preview of the sample file
+
+# explicitly setting factor levels for categorical variables helps to specify the reference level (e.g., "Control") in regression models and to ensure intuitive ordering in ggplot visualizations
+samp_info$Group=  factor(samp_info$Group, levels= c("Control", "Treatment"))
+samp_info$Day=    factor(samp_info$Day,   levels= c(0, 7, 14, 49))           
+samp_info$Mouse=  factor(paste0("Mm", samp_info$Mouse))
+samp_info$Sex=    factor(samp_info$Sex)
+
+samp_count=   data.frame(table(samp_info[,c("Day", "Group")]))
+SampleInfo=   ggplot(samp_count, aes(x= Day, y= Freq, fill= Group)) + # map "Day" to the x-axis, 
+                                                                      # map the sample count to the y-axis, 
+                                                                      # color bars by "Group"
+              geom_bar(stat= "identity",                              # plot bars using exact y values provided 
+                       position= position_dodge(width= 0.9)) +        # place bars side by side
+              geom_text(aes(label= Freq),                             # display the "Freq" value as text
+                        position= position_dodge(width= 0.9),         # align text with dodged bars
+                        vjust= -0.3,                                  # moves the text upward
+                        size= 3.5) +                                  # text size
+              scale_fill_manual(values= Group_colors) + # 
+              labs(x= "Days",                                         # x-axis label
+                   y= "Number of samples",                            # y-axis label
+                   fill= NULL)                                        # remove the "Group" title above the legend
+SampleInfo
+```
+
+**Figure 1. Sample information.** The x-axis shows the days (0, 7, 14, and 49) on which synovial fluid was extracted. The y-axis shows the number of samples collected at each time point. At days 0 and 14 there were six control (gray) and six treatment (blue) samples; at day 7 there were five control and six treatment samples; and at day 49 there were five control and five treatment samples. All samples were from female mice.
+
+```{r sample_inf_save, include=FALSE}
+ggsave(SampleInfo, filename=  here("results", paste0("SampleInfo", current_date, ".pdf")), unit= "cm", width= 12, height= 12)
+```
+
+## Exploratory data analysis
+### QC of Proteomics Data
+To assess data quality, I generated boxplots and density plots (Figure 2). The boxplots show that sample medians are closely aligned, their variability is similar (overlapping IQRs), and the cloud of individual points is comparable between case and control, with no extreme outliers (Figure 2A). Similarly, the density curves for both groups are unimodal and approximately symmetric, supporting the use of downstream models that assume roughly normal residuals (Figure 2B).
+
+```{r fig_qc, fig.width=10, fig.height=5, out.width="100%", fig.align="center"}
+# upload log2 transformed data 
+# each row represents a protein, each column represents a sample
+norm_data=             read.csv(here("data", "processed", "ProteomicsData_TaskDataScienceJob.csv"))
+dim(norm_data)
+# str(norm_data)
+colnames(norm_data)[1]='mm_gene_name'
+
+sum(colSums(is.na(norm_data[,-1])) > 0)  # check whether is any NAs
+# apply(norm_data[,-1], 2, summary)        # check whether is there any NAs or zeros in the data
+
+# reformatting the normalized data to prepare downstream analysis
+norm_data2 =   norm_data %>%
+               pivot_longer(
+               cols      = -mm_gene_name,
+               names_to  = "Sample_ID",
+               values_to = "log2")
+norm_data2=    data.frame(norm_data2)
+
+# merging reformatted normalized data with sample information
+norm_data3=    merge(norm_data2, by.x= "Sample_ID", samp_info, by.y= "Sample_ID")
+# str(norm_data3)
+# head(norm_data3)
+
+# Exploratory data analysis - Quality control of the data
+boxplot_p=   ggplot(norm_data3, aes(x= Group, y= log2, fill= Group)) +
+             geom_jitter(width= 0.15, size= 0.25, alpha= 0.2, color= "black") +
+             geom_boxplot(width= 0.45, outlier.shape= NA, alpha= 0.7) +
+             facet_grid(Day ~ Mouse) +
+             labs(title= NULL, x= "Group", y= "Protein intensities (log2)", fill= NULL) +
+             scale_fill_manual(values = Group_colors)+
+             stat_summary(fun = median, aes(label = sprintf("%.1f", after_stat(y))), 
+                          geom= "label", fill = 'white', size=2, alpha = 0.6) +
+            theme(axis.text.x= element_text(angle= 90, vjust= 0.5, hjust= 1))
+ 
+density_p=  ggplot(norm_data3, aes(x= log2, fill= Group)) +
+            geom_density(alpha= 0.4) +
+            facet_grid(Day ~ Mouse) +
+            labs(title= NULL, x= "Protein intensities (log2)", y= "Density", fill= NULL) +
+            scale_fill_manual(values= Group_colors) +
+            theme(axis.text.x= element_text(angle= 90, vjust= 0.5, hjust= 1))
+
+CombinedQC= boxplot_p + density_p +
+            plot_annotation(tag_levels = "A",        # labels panels A, B
+                            tag_suffix = ")",        # add a )
+                            theme= theme(plot.tag= element_text(face= "bold", size= 20),
+                            plot.tag.position= c(0, 1)))  # top-left inside each panel
+
+CombinedQC
+```
+
+**Figure 2. Quality‐control of log2‐transformed protein intensities.** A total of 221 proteins were quantified in synovial-fluid samples from six mice at four time points. All intensities were log2-transformed. Facets are arranged as a grid with columns for individual mice (Mm_1 through Mm_6) and rows for sampling days (0, 7, 14, 49). **A)** Boxplots summarize the distribution of protein intensities. Each dot represents a protein (*n*= 221). The horizontal line= median (which is also displayed as a white label); the box= interquartile range (IQR); whiskers= 1.5xIQR; control= grey; treatment= blue. **B)** Kernel-density estimates of the same data illustrate the full distribution shape for control (grey) versus treatment (blue) samples.
+
+
+```{r saveQC, include=FALSE}
+ggsave(CombinedQC, filename=  here("results", paste0("CombinedQC", current_date, ".pdf")), unit= "cm", width= 40, height= 20)
+```
+
+### PCA & Mean expression
+
+To identify the primary sources of variation in the dataset (Figure 3), I performed PCA. The first principal component (PC1) accounted for 20.3% of the total variance and clearly separated treated joints from controls. The next three components-PC2 (12.3%), PC3 (7.4%), and PC4 (6.2%)-together captured additional variation but did not segregate samples by mouse ID, suggesting minimal inter-individual effects. However, this has to be tested by including mouse as a random intercept in the mixed‐effects model.
+
+```{r figpca, fig.width=8, fig.height=4, fig.align="center"}
+norm_data_pca=           t(norm_data[,-1]) # remove the gene names and transpose data (rows= samples, columns= proteins)
+colnames(norm_data_pca)= norm_data[,1]     # assign gene names as column names
+pca_res=                 prcomp(norm_data_pca, scale.= TRUE) # run PCA after scaling (mean= 0; sd= 1)
+
+pca_res2=                data.frame(pca_res$x[,1:4]) # each row is a sample and each column is a principal component 
+                                                     # extract the first four PC scores  
+# head(pca_res2)
+
+pca_res2$Sample_ID=      rownames(pca_res2)
+pca_res3=                merge(pca_res2, by.x= "Sample_ID", samp_info, by.y= "Sample_ID") # merge PCA results with sample metadata
+# str(pca_res3)
+# head(pca_res3)
+
+pc_var=     summary(pca_res)$importance[2, 1:4]*100  # calculate percentage variance explained for four PCs
+pc_labels=  paste0("PC", 1:4, " (", round(pc_var, 1), "%)") # create axes labels including % variance for plotting
+
+x_range=    range(c(pca_res3$PC1, pca_res3$PC3)) # determine consistent axes limits across plots
+y_range=    range(c(pca_res3$PC2, pca_res3$PC4))
+
+pca_res3$label= paste0("Day", pca_res3$Day, "_", pca_res3$Mouse)
+
+# plot PC1 vs PC2, coloring by group and labeling points by mouse
+PCA12_Mm=  ggplot(pca_res3, aes(x=PC1, y=PC2, color= Group)) +
+           geom_point(size= 4, alpha= 0.8) +
+           geom_text(aes(label= Mouse), size= 3, vjust= -1) + 
+           labs(x= pc_labels[1], y= pc_labels[2])+
+           scale_color_manual(values= Group_colors)+
+           theme(legend.position= "none")+
+           xlim(x_range) +
+           ylim(y_range) 
+# plot PC1 vs PC2, coloring by group and labeling points by mouse
+PCA34_Mm=  ggplot(pca_res3, aes(x=PC3, y=PC4, color= Group)) +
+           geom_point(size= 4, alpha= 0.8) +
+           geom_text(aes(label= Mouse), size= 3, vjust= -1) + 
+           labs(x= pc_labels[3], y= pc_labels[4])+
+           scale_color_manual(values= Group_colors)+
+           theme(legend.position= "none")+
+           xlim(x_range) + 
+           ylim(y_range) 
+CombinedPCA_Mm=  PCA12_Mm + PCA34_Mm 
+CombinedPCA_Mm
+```
+
+**Figure 3. Principal Component Analysis of proteomes.** Each dot is one sample, colored by group (blue= treated; gray= control) and labeled by mouse ID (Mm1–Mm6). Left: PC1 (20.3%) vs PC2 (12.3%). Right: PC3 (7.4%) vs PC4 (6.2%).
+
+```{r savePCA, include=FALSE}
+ggsave(CombinedPCA_Mm, filename=  here("results", paste0("CombinedPCA_Mm", current_date, ".pdf")), unit= "cm", width= 24, height= 12)
+```
+
+To disentangle the contributions of treatment and time, I plotted PC1 versus PC2 for each time point (days 0, 7, 14, and 49) (Figure 4). Between days 0 and 14, treated samples (blue) and controls (gray) occupy distinct regions along PC1, reflecting a strong treatment/time-dependent effect in the data. By day 49, the treatment and control clusters overlap substantially, indicating that the treated joint's proteome has largely realigned with healthy controls.
+
+To confirm this convergence at the level of individual proteins, independent of PCA, I computed the mean log2 expression of each protein separately for control and treatment at each day, then plotted paired boxplots with connecting lines (Figure 4). Days 0–14 show widespread shifts in protein means between groups, whereas day 49 reveals nearly identical paired distributions, indicating that the proteomic profiles are no longer distinguishable by treatment, which is consistent with successful alleviation of osteoarthritis.
+
+```{r figpca2, fig.width=10, fig.height=5, out.width="100%", fig.align="center"}
+# plot PC1 vs PC2, coloring by group and labeling points by day, faceting by day
+PCA12_DayF= ggplot(pca_res3, aes(x= PC1, y= PC2, color= Group)) +
+            geom_point(size= 4, alpha= 0.8) +
+            geom_text(aes(label= Day), size= 3, vjust= -1) + 
+            facet_wrap(~Day, ncol= 2) +
+            labs(title = "PCA faceted by day", x= pc_labels[1], y= pc_labels[2])+
+            scale_color_manual(values= Group_colors)+
+            theme(legend.position= "none")+
+            xlim(x_range) +
+            ylim(y_range) 
+
+mean_expr= aggregate(log2 ~ Day + Group + mm_gene_name, data= norm_data3, FUN= mean) # aggregate log2 by day, group and mm_gene_name
+names(mean_expr)[names(mean_expr) == "log2" ]= "mean_log2"
+meanbox=   ggplot(mean_expr, aes(x= Group, y= mean_log2, fill= Group)) +
+           geom_boxplot(width= 0.4, outlier.shape= NA, alpha= 0.9, colour= "grey30", size= 0.3) +        
+           geom_line(aes(group= mm_gene_name), position= position_dodge(width= 0.4),colour= "grey50", alpha= 0.2, linewidth= 0.3) + # lines connect the same protein's mean in control vs treatment
+           geom_jitter(position= position_jitter(width= 0.15), colour= "grey40", alpha= 0.4, size= 0.6) + # Jittered points show each protein's mean 
+           facet_wrap(~ Day, scales= "free_y", ncol= 2) +
+           labs(title = "Mean protein expression per day", x= "Group", y= "Mean log2 expression")+
+           scale_fill_manual(values= Group_colors)
+CombinedPCA_MeanBox= PCA12_DayF + meanbox 
+
+CombinedPCA_MeanBox2= (PCA12_DayF + meanbox) + plot_layout(ncol= 2, widths = c(1, 1.4))  
+CombinedPCA_MeanBox2
+```
+
+```{r savePCA2, include=FALSE}
+ggsave(CombinedPCA_MeanBox, filename=  here("results", paste0("CombinedPCA_MeanBox", current_date, ".pdf")) , unit= "cm", width= 28, height= 16)
+```
+
+**Figure 4. Faceted PCA and per‐day mean expression.** Left: PC1 vs. PC2 for days 0, 7, 14, and 49. Each point represents one sample, colored by group (gray= control; blue= treatment), and faceted (and labeled) by day. Right: Boxplots of each protein's mean log2 expression for control vs. treatment on each day. Individual proteins are connected by light gray lines; dots show per‐protein means.
+
+## Statistical Modeling
+
+During quality control, I found that the protein‐expression data are approximately normally distributed, which might suggest using a paired t‐test. However, there are two issues:
+
+1. Missing values would force us to discard any unpaired observations
+2. Repeated measurements -both multiple time points per mouse and paired joints within each mouse- introduce correlations a t-test cannot handle
+
+A linear mixed‐effects model is more appropriate here because it can simultaneously account for:
+
+- mouse‐level correlation (each mouse measured repeatedly) via `1 | Mouse` , and
+- within‐mouse pairing of treated vs. control joints via `1 | Mouse:Joint`.
+
+Fitting this initial model across all proteins (`model1`) yielded near-zero variance estimates for both random effects, suggesting additional structure was needed. I therefore added a third random term nesting proteins within each joint `1 | Mouse:Joint:mm_gene_name`.
+
+In `model2`, only the `1 | Mouse:Joint:mm_gene_name` term had a substantial standard deviation (2.44), while the higher-level effects remained negligible. This indicates that protein-specific differences within each joint drive most of the variance. To avoid over-parameterization, I simplified to `model3`.
+
+The fixed effects of the model- group, day, and their interaction- quantify how treatment, time, and their combined effect influence protein expression.
+
+```{r model, message=FALSE, warning=FALSE}
+norm_data3$Joint= norm_data3$Group
+# head(norm_data3)
+# str(norm_data3)
+
+# model1: two random intercepts
+model1= lmer(log2 ~ Group * Day  + (1 | Mouse) + (1 | Mouse:Joint), data= norm_data3, control= lmerControl(check.conv.singular= "ignore"))
+
+# model 2: add protein-within-joint random intercept
+model2= lmer(log2 ~ Group * Day
+             + (1 | Mouse)
+             + (1 | Mouse:Joint)
+             + (1 | Mouse:Joint:mm_gene_name),
+             data = norm_data3, control= lmerControl(check.conv.singular= "ignore"))
+
+# model 3: simplify to the single random effect
+model3= lmer(log2 ~ Group * Day + (1 | Mouse:Joint), data= norm_data3, control= lmerControl(check.conv.singular= "ignore"))
+```
+
+### Gene-level mixed-effects analysis of `groupxday` interactions
+
+#### Are any proteins responsive to the treatment? What changes do we see over time? 
+I fitted gene‐level linear mixed‐effects models testing the `groupxday` interaction to identify proteins whose temporal expression trajectories differ significantly between control and treatment. Figure 5 shows which proteins respond to treatment and how their abundances evolve over time. Out of the 221 quantified proteins, 14 exhibited a significant `groupxday` interaction (FDR<0.05).
+
+For example, _Jchain_ and _Fgb_ (inflammation markers) are elevated in treated joints at day 0, decline sharply by day 14, and align with controls by day 49 (Figure 5). In contrast, _Mmp2_ and _Gsn_ (cartilage-remodeling markers) start low in treated joints at day 0, rise through days 7-14, then return to control levels by day 49 (Figure 5). Overall, control-treatment differences peak between days 7 and 14; by day 49, most proteins have realigned with healthy controls, suggesting effective alleviation of osteoarthritic pathology.
+
+```{r fitmodelperpro, fig.width=12, fig.height=12, out.width="100%", fig.align="center"}
+head(norm_data3)
+genesx= unique(norm_data3$mm_gene_name) # get the name of all unique genes 
+
+results= data.frame(Gene= genesx, p.value= NA) # create data frame to store each gene and its p-value
+
+# loop over each gene to fit a mixed model and extract the interaction p-value
+for(i in 1:length(genesx)){
+  gen=         genesx[i]                                       
+  df=          norm_data3[norm_data3$mm_gene_name%in%gen,]   # subset the data for genesx[i]       
+  
+  # fit a linear mixed-effects model; response: log2 expression
+  # fixed effects: group, day, group:day interaction
+  # random factor: joint nested within mouse
+  fit=        lmer(log2 ~ Group * Day + (1 | Mouse:Joint), data= df,
+                   control= lmerControl(check.conv.singular= "ignore")) # suppress singular‐fit errors
+                   
+  aov_tab=    data.frame(anova(fit))                  # computes the ANOVA table for "fit" to get p-value
+  results$p.value[i]= aov_tab["Group:Day", "Pr..F."]  # extract the p-value for the group:day interaction term
+  }
+
+results$FDR= p.adjust(results$p.value, method= "BH") # adjust the p-values for multiple testing
+# head(results)
+
+# connect to the Mouse Ensembl mart
+# mart=   useMart(biomart  = "ensembl",
+#                 dataset  = "mmusculus_gene_ensembl",
+#                 host     = "https://www.ensembl.org")
+
+# save the Mart object locally to preserve the exact ensembl version 
+# and allow offline use if the remote Ensembl service becomes unavailable
+# saveRDS(mart, file=here("data", "processed", "rds", "MouseEnsemblmart.rds")) 
+
+mart= readRDS(here("data", "processed", "rds", "MouseEnsemblmart.rds"))
+
+# save the version of Ensembl
+martx=  listMarts(host= "https://www.ensembl.org") 
+martx2= martx[martx$biomart%in% "ENSEMBL_MART_MOUSE","version"]
+
+# pull annotations for gene symbols
+annot= getBM(attributes = c("mgi_symbol", "ensembl_gene_id", "description"),
+                          filters= "mgi_symbol", values= results$Gene, mart= mart)
+# merge back into results
+results_annot= merge(results, annot, by.x= "Gene", by.y= "mgi_symbol")
+head(results_annot)
+
+key= data.frame(Variable= c("Gene", "p.value", "FDR", "ensembl_gene_id", "description"), 
+                Description= 
+                c("Protein identifier (mouse gene name)", 
+                  "p-value for the group:day interaction from the mixed model (lmer)", 
+                  "Benjamini–Hochberg–adjusted p-value for multiple testing",
+                  paste0("Ensembl Gene ID for Mus musculus from Ensembl", "_", martx2),
+                  "Gene_description"))
+                
+# create a new workbook
+wb= createWorkbook()
+
+# add the key
+addWorksheet(wb, "Key")
+writeData(wb, "Key", key, startRow= 1, startCol= 1)
+
+# add the results sheet
+addWorksheet(wb, "Results")
+writeData(wb, "Results", results_annot, startRow= 1, startCol= 1)
+
+out_path= here("results", paste0("Interaction_pvalues_", current_date, ".xlsx") )
+saveWorkbook(wb, out_path, overwrite= TRUE)
+
+# subset to only those genes with FDR< 0.05
+results_sig= results[results$FDR< 0.05,]
+dim(results_sig)
+results_sig
+
+# to plot significant proteins according to their significance level
+results_sig=                        results_sig[order(results_sig$FDR),] 
+# select the expression of significant protein
+norm_data3_sign_gene=               norm_data3[norm_data3$mm_gene_name%in%results_sig$Gene,] 
+# merge with the sample information file
+norm_data3_sign_gene2=              merge(norm_data3_sign_gene, by.x='mm_gene_name', results_sig, by.y='Gene')   
+norm_data3_sign_gene2$mm_gene_name= factor(norm_data3_sign_gene2$mm_gene_name, levels= results_sig$Gene) 
+head(norm_data3_sign_gene2)
+
+labela=          norm_data3_sign_gene2[,c('mm_gene_name', 'FDR')]
+labela=          labela[!duplicated(labela), ]
+labels_with_fdr= setNames(paste0(labela$mm_gene_name, "\nFDR=", signif(labela$FDR, 2)), labela$mm_gene_name)
+
+# compute per‐protein, per‐group, per‐day summaries
+mean_df= norm_data3_sign_gene2 %>%
+         group_by(mm_gene_name, Group, Day) %>%
+         dplyr::summarise(
+         mean_log2= mean(log2),
+         se_log2= sd(log2)/sqrt(n()),
+         .groups= "drop")
+
+TimeCourse=  ggplot() +
+             geom_jitter(data= norm_data3_sign_gene2, aes(x= as.numeric(as.character(Day)), y= log2, color= Group), width= 1, 
+                         height= 0, size= 1.5, alpha= 0.4) +
+             geom_ribbon(data= mean_df, aes(x= as.numeric(as.character(Day)), ymin= mean_log2 - se_log2, ymax= mean_log2 +
+                                            se_log2, # lower bound= mean minus one SE; upper bound= mean plus one SE
+                                       fill= Group), alpha= 0.2, inherit.aes= FALSE) +
+             geom_line(data= mean_df, aes(x= as.numeric(as.character(Day)),  y= mean_log2, color= Group), linewidth= 0.9) +
+             geom_point(data= mean_df, aes(x= as.numeric(as.character(Day)), y= mean_log2, color= Group), size= 3) +
+             facet_wrap(~ mm_gene_name, scales= "free_y", labeller= labeller(mm_gene_name= labels_with_fdr)) +
+             scale_color_manual(values= Group_colors) +
+             scale_fill_manual(values= Group_colors) +
+             scale_x_continuous(breaks= c(0, 7, 14, 49)) +
+             labs(x= "Days", y= "Protein intensities (log2)", color= "Group", fill= "Group") +
+             theme(strip.text= element_text(face= "bold"))
+TimeCourse0= TimeCourse
+TimeCourse0
+```
+
+**Figure 5. Longitudinal expression trajectories of the 14 proteins with significant group x day interactions (FDR< 0.05).**
+Each facet shows one protein (gene name in bold) with its FDR. Dots represent individual sample log2 expression values at each day (gray= control; blue= treatment). Shaded ribbons show the group mean ±1SE at each time point. Solid lines and larger points show group mean trajectories over time. x-axis: days; y-axis: protein intensity (log2).
+
+```{r saveTimeCourse, include=FALSE}
+ggsave(TimeCourse, filename=  here("results", paste0("ProteinTimeCourse_Significant", current_date, ".pdf")) , unit= "cm", width= 32, height= 28)
+```
+
+#### How do these proteins compare to those in the healthy joints? 
+Although the time‐course trajectories give a clear visual indication of when control and treatment diverge or reconverge, they do not provide formal statistical evidence for each day. To address this, I performed post‐hoc, day‐by‐day comparisons between control and treatment for each of the 14 significant proteins. Using the `emmeans`, I computed estimated marginal means of group at days 0, 7, 14, and 49 and conducted pairwise contrasts (control-treatment) at each time point. P-values were then adjusted using the `Benjamini-Hochberg` correction. 
+
+Figure 6 shows that, relative to healthy controls, osteoarthritic joints exhibit a pronounced imbalance: inflammatory proteins are initially elevated while remodeling enzymes are suppressed. Both classes reach maximal divergence around day 7 but converge to near-control levels by day 49, indicating that the treatment restores a healthy proteomic state over time (Figure 6).
+
+```{r pairwise, fig.width=10, fig.height=5, out.width="100%", fig.align="center"}
+head(norm_data3_sign_gene)  # data frame including the expression of the significant 14 proteins
+# str(norm_data3_sign_gene)
+
+siggen= unique(norm_data3_sign_gene$mm_gene_name)
+all_contrasts= rbind() # create an empty data frame to collect all pairwise contrasts
+for(i in 1:length(siggen)){
+  gen= siggen[i]
+  df= norm_data3_sign_gene[norm_data3_sign_gene$mm_gene_name%in%gen,]
+  
+  fit= lmer(log2 ~ Group * Day + (1 | Mouse:Joint), data= df, control= lmerControl(check.conv.singular= "ignore")) 
+  emm= emmeans(fit, ~ Group | Day, at = list(Day = c("0","7","14","49")))
+  cont= data.frame(contrast(emm, method= "pairwise", adjust = "BH"))
+  cont$gene= gen
+  all_contrasts= rbind(all_contrasts, cont)}
+
+# head(all_contrasts)
+# str(all_contrasts)
+gg_df=     all_contrasts
+gg_df2=    gg_df %>%
+           mutate(
+           sig = case_when(
+           p.value <= 0.001 ~ "***",
+           p.value <= 0.01  ~ "**",
+           p.value <= 0.05  ~ "*", TRUE~ ""))
+# head(gg_df2)
+Heatmap= ggplot(gg_df2, aes(x= Day, y= gene, fill= estimate)) +
+         geom_tile() +
+         geom_text(aes(label= sig), color= "black", size= 3.5, vjust= 0.5) +
+         scale_fill_gradient2(low= "navy", mid= "white",
+         high= "firebrick3", midpoint = 0,
+         name= "Control-Treatment\n (log2 difference)") +
+         labs(x= "Day", y= "Gene")
+
+Heatmap0= Heatmap + theme(aspect.ratio= 0.5)
+Heatmap0
+```
+**Figure 6. Heatmap of control-treatment log2 differences.** Color indicates the estimated marginal mean difference in log2 protein expression between control and treatment at each day. Red (positive values) shows mean expression is higher in control than treatment. Blue (negative values) shows mean expression is higher in treatment than control. White (near zero) means little or no difference. Asterisks show the significance of the pairwise contrast (control vs. treatment) at that day, after Benjamini–Hochberg correction: p ≤ 0.05; * p ≤ 0.01; ** p ≤ 0.001.
+
+```{r savepairwise, include=FALSE}
+ggsave(Heatmap, filename=  here("results", paste0("Heatmap", current_date, ".pdf")) , unit= "cm", width= 12, height= 12)
+```
+
+## Discussion
+### What are the limitations of the study? 
+1. There is not any key for the sample information file ("Metadata_TaskDataScienceJob.csv") which explaining the meaning and format of each variable. Also the "SampleID" column includes a suffix such as "M8" (e.g., "Treatment_day_49_M8"), which appears to represent the mouse identity. However, this suffix ("M8") does not match the corresponding value in the "Mouse" column, which is "6" in all these rows. If "M8" is intended to mean "Mouse 8", then the value in the "Mouse" column should be "8", not "6". While this mismatch does not currently affect the analysis, it is very important to ensure consistency in the metadata. As this dataset serves as pilot data for a larger study, such inconsistencies could become problematic in future stages of the project.
+
+2. A few mice have missing samples at some time points (Figure 1), but we do not have metadata on why those observations are missing. Linear mixed‐effects models can handle this unbalanced design, but logging the actual causes of sample loss  would let us verify the "missing at random" assumption.
+
+3. Osteoarthritis is an age-related disease that affects individuals over the age of 45. Another important contributing factor is sex and body weight. Given the current study design, the weight and age of the mice should have been recorded. The experiment could also have been designed to include a balanced number of male mice. Also the cage or batch origin of each mouse should have been documented to account for potential cage- or batch-specific effects.
+
+4. An inflammatory response in the treated joint could trigger systemic effects and affect the opposite control leg. Therefore, a separate cohort of healthy mice without osteoarthritis should have been included.
+
+5. Samples were taken at Days 0, 7, 14, and 49, leaving a 35-day gap between the last two timepoints. Such a long interval may miss important proteomic changes during treatment response.
+
+6. The small sample size, combined with missing measurements, reduces the study's statistical power and increases the risk of failing to detect real treatment effects (Type II errors).
+
+### How would you design a better experiment? What would you consider for the larger study these data piloted?
+
+1. I would align mouse age with the equivalent human age. Although osteoarthritis in humans typically develops after age 45, using mice that are at least three months old would allow for the capture of broader age-related changes, rather than modeling a specific point of disease onset.
+
+2. I would adjust the sampling schedule to align more closely with the human osteoarthritis window.
+
+3. Daily or short-interval sampling of live animals may not be feasible, I would incorporate non-invasive longitudinal measures such as imaging to monitor disease progression over time.
+
+4. To minimize bias and batch effects, I would randomize both the allocation of mice to treatment and control groups and the order in which samples are collected and processed. 
+
+5. Including technical replicates would help distinguish technical variability from biological variation.
+
+6. I would also ensure comprehensive metadata collection (sex, age, weight, cage assignment, handler identity, and pain behavior) to enable their inclusion as covariates in statistical models. 
+
+7. I would include a separate cohort of healthy mice without osteoarthritis, independent of the paired joint design.
+
+8. Instead of transforming the data and potentially distorting its original scale, I would fit a generalized linear mixed model (GLMM) using a Tweedie response distribution appropriate for proteomics. The Tweedie (a compound Poisson–gamma family) naturally accommodates both zero‐inflation (for undetected proteins) and continuous positive abundances.
+
+9. I would conduct a formal power analysis in the `simr` R package, using pilot‐derived effect sizes for proteins like Jchain and Fgb as well as published osteoarthritis biomarker magnitudes, and simulate the mixed‐effects models (including key covariates) across a range of sample sizes and effect sizes to determine how many mice are required to detect a `treatment×time` interaction at FDR< 0.05.
+
+### There were a low number of proteins identified in this study, why do you think this is? 
+
+Only 221 proteins were detected, probably because the small synovial‐fluid volumes limited the amount of protein available. High‐abundance proteins may also have masked lower‐abundance ones. In a larger study, removing those abundant proteins and using targeted assays for key osteoarthritis biomarkers would increase the number of proteins identified.
+
+### Do you think the treatment was successful at alleviating osteoarthritis? If so, why? Or why not? 
+
+Yes. Analyses show that by day 49 treated proteomic profiles have largely converged with healthy joints. In PCA (Figure 4), treated and control samples occupy distinct regions from days 0-14 yet overlap almost completely by day 49. To confirm this convergence at the level of individual proteins, I computed the mean log2 expression of each protein for control versus treatment at each day and plotted paired boxplots with connecting lines (also Figure 4). Days 0-14 show widespread shifts in protein means between groups, whereas day 49 reveals nearly identical paired distributions. Time-course trajectories for the 14 most significant proteins (Figure 5) further illustrate this: inflammatory markers _Jchain_ and _Fgb_, initially elevated, drop to control levels by day 49, and cartilage-remodeling genes _Mmp2_ and _Gsn_, initially suppressed, rise to match healthy abundances. Finally, the heatmap of pairwise contrasts (Figure 6) confirms that control-treatment differences, which peak at day 7-14, vanish by day 49. Together, these findings demonstrate that the intervention successfully restores a healthy joint proteome over time.
+
+
+```{r session-info, echo=FALSE}
+si       = sessionInfo()
+pkgs     = si$otherPkgs
+r_version= R.Version()$version.string
+
+# build data.frame of Package / Version, with R as the first row
+df= rbind(
+    data.frame(Package = "R", Version = r_version, stringsAsFactors = FALSE),
+    data.frame(
+    Package = names(pkgs),
+    Version = vapply(pkgs, function(x) x$Version, character(1)),
+    stringsAsFactors = FALSE))
+
+knitr::kable(df, caption = "R session and loaded packages with versions")
+
