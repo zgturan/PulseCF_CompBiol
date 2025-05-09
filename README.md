@@ -2,7 +2,7 @@
 
 Here's the layout of the main folders and files in this project:
 
-knitr::include_graphics("structure.png")
+![Project structure](structure.png)
 
 ## 00_Setup.sh
 Automates project initialization by creating the directory structure (data/, scripts/, results/, etc.) and downloading any required baseline files.
